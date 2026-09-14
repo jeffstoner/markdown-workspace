@@ -10,6 +10,7 @@ interface HeaderProps {
   activeFile: FileSystemNode | null;
   viewMode: ViewMode;
   onViewModeChange: (mode: ViewMode) => void;
+  version?: string;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -19,7 +20,8 @@ export const Header: React.FC<HeaderProps> = ({
   isReadOnly,
   activeFile,
   viewMode,
-  onViewModeChange
+  onViewModeChange,
+  version = 'v1.0.1'
 }) => {
   return (
     <header
@@ -46,11 +48,11 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="flex items-center gap-1.5">
             <span className={`font-bold text-sm tracking-wide ${isDark ? 'text-white' : 'text-slate-900'}`}>MARKDOWN</span>
             <span
-              className={`font-extrabold text-[10px] px-1.5 py-0.5 rounded border uppercase ${
+              className={`font-extrabold text-[10px] px-1.5 py-0.5 rounded border tracking-wide ${
                 isDark ? 'text-indigo-400 bg-indigo-950/80 border-indigo-900/50' : 'text-indigo-600 bg-indigo-50 border-indigo-200'
               }`}
             >
-              WORKSPACE
+              WORKSPACE {version}
             </span>
           </div>
         </div>

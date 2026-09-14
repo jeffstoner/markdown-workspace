@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { ThemeSetting } from '../types';
 
-export function useTheme(initialTheme: ThemeSetting = 'dark') {
+export function useTheme(initialTheme: ThemeSetting = 'system') {
   const [themeSetting, setThemeSetting] = useState<ThemeSetting>(initialTheme);
   const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() => {
     if (typeof window !== 'undefined' && window.matchMedia) {

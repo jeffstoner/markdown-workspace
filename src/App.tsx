@@ -2,13 +2,36 @@ import React, { useState, useEffect, useMemo } from 'react';
 import type { FileSystem, FileSystemNode, ViewMode, ThemeSetting } from './types';
 import { initialFileSystem } from './data/initialFileSystem';
 import { calculateFileStats } from './utils/markdown';
-import { openSystemDirectory } from './utils/directoryPicker';
 import { useTheme } from './hooks/useTheme';
 import { Header } from './components/Header/Header';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { Editor } from './components/Editor/Editor';
 import { SettingsModal } from './components/Settings/SettingsModal';
 import { Toast } from './components/common/Toast';
+import { fetchSettings, saveSettings } from './services/settingsService';
+import {
+  openWorkspaceDirectory,
+  scanDirectory,
+  getCliTarget,
+  getAppVersion,
+  readFileContent,
+  writeFileContent,
+  createFileEntry,
+  createFolderEntry,
+  renameEntry,
+  deleteEntry
+} from './services/fileSystemService';
+
+function getAncestorFolderIds(fsMap: FileSystem, targetId: string): string[] {
+  const ancestors: string[] = ['root'];
+  for (const [folderId, node] of Object.entries(fsMap)) {
+    if (node.type === 'folder' && node.children && node.children.includes(targetId)) {
+      ancestors.push(folderId);
+      ancestors.push(...getAncestorFolderIds(fsMap, folderId));
+    }
+  }
+  return ancestors;
+}
 
 export default function App() {
   const [fileSystem, setFileSystem] = useState<FileSystem>(initialFileSystem);
@@ -30,15 +53,123 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isReadOnly, setIsReadOnly] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [appVersion, setAppVersion] = useState<string>('v1.0.1');
 
-  const { themeSetting, setThemeSetting, isDark } = useTheme('dark');
+  const { themeSetting, setThemeSetting, isDark } = useTheme('system');
 
   useEffect(() => {
-    if (activeFileId && fileSystem[activeFileId]) {
-      setRawTextValue(fileSystem[activeFileId].content || '');
-      setEditingBlockIndex(null);
+    async function loadInitialSettings() {
+      try {
+        const settings = await fetchSettings();
+        setIsReadOnly(settings['read-only']);
+        setThemeSetting(settings['app-theme']);
+      } catch (err) {
+        console.error('Failed to load initial settings:', err);
+      }
+
+      try {
+        const version = await getAppVersion();
+        setAppVersion(version);
+      } catch (err) {
+        console.warn('Failed to load app version:', err);
+      }
+
+      try {
+        const cliTarget = await getCliTarget();
+        if (cliTarget) {
+          const scanResult = await scanDirectory(cliTarget.directory_path);
+          if (scanResult) {
+            setFileSystem(scanResult.fileSystem);
+
+            if (cliTarget.file_path) {
+              const targetNode = Object.values(scanResult.fileSystem).find(
+                (n) => n.path && (n.path === cliTarget.file_path || n.path.endsWith(cliTarget.file_path!))
+              );
+
+              if (targetNode) {
+                const ancestors = getAncestorFolderIds(scanResult.fileSystem, targetNode.id);
+                const expanded: Record<string, boolean> = {};
+                ancestors.forEach((id) => {
+                  expanded[id] = true;
+                });
+                setExpandedFolders(expanded);
+                setActiveFileId(targetNode.id);
+
+                if (targetNode.content !== undefined) {
+                  setRawTextValue(targetNode.content);
+                  setEditingBlockIndex(null);
+                } else if (targetNode.path) {
+                  const content = await readFileContent(targetNode.path);
+                  setFileSystem((prev) => ({
+                    ...prev,
+                    [targetNode.id]: {
+                      ...prev[targetNode.id],
+                      content
+                    }
+                  }));
+                  setRawTextValue(content);
+                  setEditingBlockIndex(null);
+                }
+              }
+            } else {
+              // Directory argument: set worktree root with no open file
+              setActiveFileId(null);
+              setRawTextValue('');
+              setExpandedFolders({ root: true });
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to process CLI target parameter:', err);
+      }
     }
-  }, [activeFileId, fileSystem]);
+    loadInitialSettings();
+  }, [setThemeSetting]);
+
+  // Load content when active file changes (lazy load from disk if needed)
+  useEffect(() => {
+    if (!activeFileId || !fileSystem[activeFileId]) return;
+
+    const file = fileSystem[activeFileId];
+    if (file.content !== undefined) {
+      setRawTextValue(file.content || '');
+      setEditingBlockIndex(null);
+    } else if (file.path) {
+      readFileContent(file.path)
+        .then((content) => {
+          setFileSystem((prev) => ({
+            ...prev,
+            [activeFileId]: {
+              ...prev[activeFileId],
+              content
+            }
+          }));
+          setRawTextValue(content);
+          setEditingBlockIndex(null);
+        })
+        .catch((err) => {
+          console.error('Failed to read file from disk:', err);
+          triggerToast('Failed to load file content');
+        });
+    }
+  }, [activeFileId]);
+
+  // Debounced auto-save for raw source editor modifications
+  useEffect(() => {
+    if (!activeFileId || isReadOnly) return;
+    const file = fileSystem[activeFileId];
+    if (!file || !file.path || file.content === undefined) return;
+
+    const timeout = setTimeout(() => {
+      if (file.path && file.content !== undefined) {
+        writeFileContent(file.path, file.content).catch((err) => {
+          console.error('Failed to auto-save file:', err);
+        });
+      }
+    }, 600);
+
+    return () => clearTimeout(timeout);
+  }, [rawTextValue, activeFileId, isReadOnly, fileSystem]);
 
   const triggerToast = (msg: string) => {
     setToastMessage(msg);
@@ -52,28 +183,50 @@ export default function App() {
     }));
   };
 
-  const handleAddFile = (parentFolderId: string) => {
+  const handleAddFile = async (parentFolderId: string) => {
     if (isReadOnly) {
       triggerToast('Read-only mode active');
       return;
     }
+    const parent = fileSystem[parentFolderId];
+    if (!parent) return;
+
     const newId = `file_${Date.now()}`;
+    const defaultName = 'New Document.md';
+    const defaultContent = '# New Document\n\nHover here and click the pencil to edit this block!';
+
+    let createdPath: string | undefined;
+
+    if (parent.path) {
+      try {
+        const created = await createFileEntry(parent.path, defaultName, defaultContent);
+        if (created) {
+          createdPath = created.path;
+        }
+      } catch (err) {
+        console.error('Failed to create file on disk:', err);
+        triggerToast('Failed to create file on disk');
+        return;
+      }
+    }
+
     const newFile: FileSystemNode = {
       id: newId,
-      name: 'New Document.md',
+      name: defaultName,
       type: 'file',
-      content: '# New Document\n\nHover here and click the pencil to edit this block!'
+      path: createdPath,
+      content: defaultContent
     };
 
     setFileSystem((prev) => {
-      const parent = prev[parentFolderId];
-      if (!parent) return prev;
+      const p = prev[parentFolderId];
+      if (!p) return prev;
       return {
         ...prev,
         [newId]: newFile,
         [parentFolderId]: {
-          ...parent,
-          children: [...(parent.children || []), newId]
+          ...p,
+          children: [...(p.children || []), newId]
         }
       };
     });
@@ -83,28 +236,49 @@ export default function App() {
     triggerToast('New Markdown file created');
   };
 
-  const handleAddFolder = (parentFolderId: string) => {
+  const handleAddFolder = async (parentFolderId: string) => {
     if (isReadOnly) {
       triggerToast('Read-only mode active');
       return;
     }
+    const parent = fileSystem[parentFolderId];
+    if (!parent) return;
+
     const newId = `folder_${Date.now()}`;
+    const defaultName = 'New Folder';
+
+    let createdPath: string | undefined;
+
+    if (parent.path) {
+      try {
+        const created = await createFolderEntry(parent.path, defaultName);
+        if (created) {
+          createdPath = created.path;
+        }
+      } catch (err) {
+        console.error('Failed to create folder on disk:', err);
+        triggerToast('Failed to create folder on disk');
+        return;
+      }
+    }
+
     const newFolder: FileSystemNode = {
       id: newId,
-      name: 'New Folder',
+      name: defaultName,
       type: 'folder',
+      path: createdPath,
       children: []
     };
 
     setFileSystem((prev) => {
-      const parent = prev[parentFolderId];
-      if (!parent) return prev;
+      const p = prev[parentFolderId];
+      if (!p) return prev;
       return {
         ...prev,
         [newId]: newFolder,
         [parentFolderId]: {
-          ...parent,
-          children: [...(parent.children || []), newId]
+          ...p,
+          children: [...(p.children || []), newId]
         }
       };
     });
@@ -113,12 +287,23 @@ export default function App() {
     triggerToast('New folder created');
   };
 
-  const handleDeleteNode = (idToDelete: string) => {
+  const handleDeleteNode = async (idToDelete: string) => {
     if (isReadOnly) {
       triggerToast('Read-only mode active');
       return;
     }
     if (idToDelete === 'root') return;
+
+    const targetNode = fileSystem[idToDelete];
+    if (targetNode?.path) {
+      try {
+        await deleteEntry(targetNode.path);
+      } catch (err) {
+        console.error('Failed to delete on disk:', err);
+        triggerToast('Failed to delete from disk');
+        return;
+      }
+    }
 
     setFileSystem((prev) => {
       const copy = { ...prev };
@@ -164,7 +349,7 @@ export default function App() {
     setRenamingNodeId(null);
   };
 
-  const handleSaveRename = (nodeId: string) => {
+  const handleSaveRename = async (nodeId: string) => {
     if (isReadOnly) {
       setRenamingNodeId(null);
       return;
@@ -179,11 +364,29 @@ export default function App() {
       finalName += '.md';
     }
 
+    const node = fileSystem[nodeId];
+    let newPath = node?.path;
+
+    if (node?.path) {
+      try {
+        const renamed = await renameEntry(node.path, finalName);
+        if (renamed) {
+          newPath = renamed.path;
+        }
+      } catch (err) {
+        console.error('Failed to rename on disk:', err);
+        triggerToast('Failed to rename on disk');
+        setRenamingNodeId(null);
+        return;
+      }
+    }
+
     setFileSystem((prev) => ({
       ...prev,
       [nodeId]: {
         ...prev[nodeId],
-        name: finalName
+        name: finalName,
+        path: newPath
       }
     }));
 
@@ -239,9 +442,18 @@ export default function App() {
       }
     }));
 
+    setRawTextValue(newContent);
     setEditingBlockIndex(null);
     setEditValue('');
-    triggerToast('Block updated successfully');
+
+    if (file.path) {
+      writeFileContent(file.path, newContent).catch((err) => {
+        console.error('Failed to save block to disk:', err);
+        triggerToast('Failed to save to disk');
+      });
+    }
+
+    triggerToast('Block updated and saved');
   };
 
   const toggleCheckbox = (blockIdx: number, lineIndexOrCheckboxIdx: number) => {
@@ -300,8 +512,16 @@ export default function App() {
         content: newContent
       }
     }));
+    setRawTextValue(newContent);
 
-    triggerToast('Checkbox synchronized');
+    if (file.path) {
+      writeFileContent(file.path, newContent).catch((err) => {
+        console.error('Failed to save checkbox to disk:', err);
+        triggerToast('Failed to save to disk');
+      });
+    }
+
+    triggerToast('Checkbox synchronized & saved');
   };
 
   const activeFile = activeFileId ? fileSystem[activeFileId] : null;
@@ -322,25 +542,36 @@ export default function App() {
     setIsReadOnly(next);
     if (next) setEditingBlockIndex(null);
     triggerToast(next ? 'Read-only mode activated' : 'Edit mode restored');
+    saveSettings({ 'read-only': next }).catch((err) => {
+      console.error('Failed to save read-only setting:', err);
+    });
   };
 
   const handleThemeSettingChange = (theme: ThemeSetting, label: string) => {
     setThemeSetting(theme);
     triggerToast(`Theme set to ${label}`);
+    saveSettings({ 'app-theme': theme }).catch((err) => {
+      console.error('Failed to save theme setting:', err);
+    });
   };
 
   const handleOpenDirectory = async () => {
-    const result = await openSystemDirectory();
-    if (!result) return;
+    try {
+      const result = await openWorkspaceDirectory();
+      if (!result) return;
 
-    setActiveFileId(null);
-    setEditingBlockIndex(null);
-    setEditValue('');
-    setRawTextValue('');
-    setFileSystem(result.fileSystem);
-    setExpandedFolders({ root: true });
-    setSearchQuery('');
-    triggerToast(`Opened folder "${result.rootName}"`);
+      setActiveFileId(null);
+      setEditingBlockIndex(null);
+      setEditValue('');
+      setRawTextValue('');
+      setFileSystem(result.fileSystem);
+      setExpandedFolders({ root: true });
+      setSearchQuery('');
+      triggerToast(`Opened folder "${result.rootName}"`);
+    } catch (err) {
+      console.error('Failed to open directory:', err);
+      triggerToast('Could not open directory');
+    }
   };
 
   return (
@@ -357,9 +588,10 @@ export default function App() {
         activeFile={activeFile}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
+        version={appVersion}
       />
 
-      <div className="flex-1 flex relative overflow-hidden">
+      <div className="flex-1 flex overflow-hidden">
         <Sidebar
           isDark={isDark}
           sidebarOpen={sidebarOpen}

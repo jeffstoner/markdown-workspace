@@ -98,9 +98,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       <div className="px-3.5 py-2.5 flex items-center justify-between">
-        <span className={`text-[11px] font-bold uppercase tracking-wider ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-          {searchQuery ? 'Search Results' : 'Explorer'}
-        </span>
+        {searchQuery ? (
+          <span className={`text-[11px] font-bold uppercase tracking-wider ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+            Search Results
+          </span>
+        ) : (
+          <div />
+        )}
         {!searchQuery && (
           <div className="flex items-center gap-1">
             <button
