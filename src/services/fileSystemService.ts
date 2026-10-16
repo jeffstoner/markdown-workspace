@@ -57,7 +57,7 @@ export async function getAppVersion(): Promise<string> {
       console.warn('Failed to get app version via Tauri command:', err);
     }
   }
-  return 'v1.0.1';
+  return 'v1.0.2';
 }
 
 /**

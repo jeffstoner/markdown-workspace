@@ -21,7 +21,7 @@ export const Header: React.FC<HeaderProps> = ({
   activeFile,
   viewMode,
   onViewModeChange,
-  version = 'v1.0.1'
+  version = 'v1.0.2'
 }) => {
   return (
     <header

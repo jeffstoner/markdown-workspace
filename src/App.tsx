@@ -53,7 +53,7 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isReadOnly, setIsReadOnly] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
-  const [appVersion, setAppVersion] = useState<string>('v1.0.1');
+  const [appVersion, setAppVersion] = useState<string>('v1.0.2');
 
   const { themeSetting, setThemeSetting, isDark } = useTheme('system');
 
